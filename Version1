@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # QmaqpShack_VOIDlinux v1.0
 # Entwickler: Armin vom You Tube Kanal PINGUIN TV
-# Pubpisher:  Oliver vom You Tube Kanal Der TUXer
+# Publisher:  Oliver vom You Tube Kanal Der TUXer
 #
 # Install QMapShack on Void Linux (with Routino from source)
 # - Installs deps (only if available)
