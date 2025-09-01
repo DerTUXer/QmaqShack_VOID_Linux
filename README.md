@@ -13,3 +13,4 @@ Fehlerbehebungen:
 - Ausgabetext aus dem Terminal beachten und ggf. die fehlenden Pakete manuell nachinstallieren.
 - Trotz Fehlermeldungen läuft QmapShack in vielen Fällen ohne Probleme
   
+<img width="1916" height="1041" alt="QmapShack" src="https://github.com/user-attachments/assets/c5fed050-f42f-4b83-b8ac-e312514e2cf2" />
