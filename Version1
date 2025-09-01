@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# QmaqpShack_VOIDlinux v1.0
+# Entwickler: Armin vom You Tube Kanal PINGUIN TV
+# Pubpisher:  Oliver vom You Tube Kanal Der TUXer
+#
+# Install QMapShack on Void Linux (with Routino from source)
+# - Installs deps (only if available)
+# - Builds Routino (not in Void repos)
+# - Builds QMapShack (Qt6 preferred, Qt5 fallback)
+# - RAM-aware parallelism; retries serial if needed
+# - Installs to /usr/local and creates .desktop
+set -euo pipefail
+
+# --- Versions & Paths ---------------------------------------------------------
+ROUTINO_VER="${ROUTINO_VER:-3.4.3}"
+ROUTINO_TGZ="routino-${ROUTINO_VER}.tgz"
+ROUTINO_URL="https://www.routino.org/download/${ROUTINO_TGZ}"
+
+REPO_URL="https://github.com/Maproom/qmapshack.git"
+SRC_DIR="${PWD}/qmapshack"
+BUILD_DIR="${SRC_DIR}/build"
+PREFIX="/usr/local"
+
+# --- Helpers ------------------------------------------------------------------
+have()    { command -v "$1" >/dev/null 2>&1; }
+section() { printf "\n\033[1;34m==> %s\033[0m\n" "$*"; }
+
+# Install only packages that exist in Void repos
+xbps_install() {
+  local to_install=()
+  for pkg in "$@"; do
+    if xbps-query -Rs "^${pkg}($| )" >/dev/null 2>&1; then
+      to_install+=("$pkg")
+    fi
+  done
+  if ((${#to_install[@]})); then
+    sudo xbps-install -Sy "${to_install[@]}"
+  fi
+}
+
+# Ensure /usr/local/lib is in linker path and refresh cache
+ensure_ldconfig_local() {
+  if ! grep -qsE '^\s*/usr/local/lib\s*$' /etc/ld.so.conf /etc/ld.so.conf.d/*.conf 2>/dev/null; then
+    echo "/usr/local/lib" | sudo tee /etc/ld.so.conf.d/local.conf >/dev/null
+  fi
+  sudo ldconfig
+}
+
+# Decide parallel jobs based on RAM (conservative for low-RAM machines)
+detect_jobs() {
+  local mem_gb
+  mem_gb=$(awk '/MemTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo 4)
+  if   (( mem_gb <= 4 ));  then echo 1
+  elif (( mem_gb <= 8 ));  then echo 2
+  elif (( mem_gb <= 12 )); then echo 3
+  else echo "$(nproc)"
+  fi
+}
+
+# --- Base tools ----------------------------------------------------------------
+section "Installiere Basis-Tools"
+xbps_install base-devel git cmake ninja pkg-config wget curl tar xz unzip
+
+# --- Qt stack (Qt6 preferred, Qt5 fallback) -----------------------------------
+section "Qt-Entwicklungspakete (Qt6 bevorzugt)"
+QT_FLAVOR=""
+# Qt6 inkl. UiTools, WebEngine, Core5Compat (korrekte Void-Namen)
+xbps_install qt6-base qt6-base-devel qt6-tools qt6-tools-devel \
+             qt6-svg qt6-svg-devel qt6-imageformats \
+             qt6-webengine qt6-webengine-devel \
+             qt6-qt5compat qt6-qt5compat-devel
+if pkg-config --exists Qt6Core 2>/dev/null || xbps-query -Rx qt6-base-devel >/dev/null 2>&1; then
+  QT_FLAVOR="qt6"
+else
+  section "Qt6 nicht gefunden – wechsle auf Qt5"
+  xbps_install qt5 qt5-devel qt5-tools qt5-tools-devel \
+               qt5-svg qt5-imageformats qt5-webengine qt5-webengine-devel
+  if pkg-config --exists Qt5Core 2>/dev/null || xbps-query -Rx qt5-devel >/dev/null 2>&1; then
+    QT_FLAVOR="qt5"
+  else
+    echo "Fehler: Weder Qt6 noch Qt5 Dev-Pakete gefunden."
+    exit 1
+  fi
+fi
+echo "Verwende $QT_FLAVOR"
+
+# --- Geo/Compression libs ------------------------------------------------------
+section "Installiere Geo-/Kompressions-Bibliotheken"
+xbps_install libgdal libgdal-devel libgdal-tools
+xbps_install proj proj-devel
+xbps_install geos geos-devel
+xbps_install sqlite sqlite-devel libspatialite libspatialite-devel
+xbps_install zlib zlib-devel bzip2 bzip2-devel xz liblzma liblzma-devel
+xbps_install exiv2 exiv2-devel
+# QuaZIP (einige Repos haben nur quazip/quazip-devel)
+xbps_install quazip quazip-devel quazip-qt6 quazip-qt6-devel quazip-qt5 quazip-qt5-devel
+
+# --- Build & install Routino from source --------------------------------------
+section "Baue Routino ${ROUTINO_VER} aus Source (für QMapShack benötigt)"
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
+cd "$WORKDIR"
+[[ -f "${ROUTINO_TGZ}" ]] || { echo "Downloade ${ROUTINO_URL}"; curl -L -o "${ROUTINO_TGZ}" "${ROUTINO_URL}"; }
+tar -xzf "${ROUTINO_TGZ}"
+cd "routino-${ROUTINO_VER}"
+JOBS="$(detect_jobs)"
+make -j"${JOBS}" || make -j1
+sudo make install
+ensure_ldconfig_local
+# Sanity check
+if [[ ! -f /usr/local/include/routino.h ]] || [[ ! -e /usr/local/lib/libroutino.so && ! -e /usr/local/lib/libroutino.a ]]; then
+  echo "Fehler: Routino wurde nicht korrekt installiert (Header/Lib fehlen)."
+  exit 1
+fi
+
+# --- Fetch QMapShack ----------------------------------------------------------
+section "QMapShack-Quellcode holen/aktualisieren"
+if [[ ! -d "$SRC_DIR/.git" ]]; then
+  git clone --depth=1 "$REPO_URL" "$SRC_DIR"
+else
+  git -C "$SRC_DIR" pull --ff-only
+fi
+
+# --- Configure & build QMapShack ----------------------------------------------
+section "CMake-Build-Verzeichnis vorbereiten"
+mkdir -p "$BUILD_DIR"
+cd "$BUILD_DIR"
+rm -rf CMakeCache.txt CMakeFiles/
+
+# Choose generator
+CMAKE_GEN=()
+if have ninja; then CMAKE_GEN=(-G Ninja); fi
+
+section "CMake-Konfiguration"
+CMAKE_ARGS=(
+  -DCMAKE_BUILD_TYPE=Release
+  -DCMAKE_INSTALL_PREFIX="${PREFIX}"
+  -DCMAKE_PREFIX_PATH="/usr/local;/usr"
+  -DCMAKE_CXX_FLAGS_RELEASE="-O2 -g0"
+)
+if [[ "$QT_FLAVOR" == "qt6" ]]; then
+  CMAKE_ARGS+=(-DQT_DEFAULT_MAJOR_VERSION=6)
+else
+  CMAKE_ARGS+=(-DQT_DEFAULT_MAJOR_VERSION=5)
+fi
+
+# Quellpfad ist der Elternordner ("..")
+cmake "${CMAKE_GEN[@]}" .. "${CMAKE_ARGS[@]}"
+
+section "Kompilieren (RAM-bewusst)"
+JOBS="$(detect_jobs)"
+if have ninja; then
+  ninja -j"${JOBS}" || ninja -j1
+else
+  make -j"${JOBS}"  || make -j1
+fi
+
+section "Installieren (sudo)"
+if have ninja; then
+  sudo ninja install
+else
+  sudo make install
+fi
+
+# --- Desktop entry -------------------------------------------------------------
+section "Desktop-Integration"
+DESKTOP_FILE="/usr/share/applications/qmapshack.desktop"
+if [[ ! -f "$DESKTOP_FILE" ]]; then
+  sudo tee "$DESKTOP_FILE" >/dev/null << 'EOF'
+[Desktop Entry]
+Name=QMapShack
+GenericName=GPS Map Tool
+Comment=View, plan and manage GPS tracks and maps
+Exec=/usr/local/bin/qmapshack
+Icon=qmapshack
+Terminal=false
+Type=Application
+Categories=Education;Science;Geography;Utility;
+StartupNotify=true
+EOF
+  echo "Desktop-Datei erstellt: $DESKTOP_FILE"
+else
+  echo "Desktop-Datei existiert bereits: $DESKTOP_FILE"
+fi
+
+section "Fertig! Starte QMapShack mit:"
+echo "qmapshack"
+echo
+echo "Hinweise:"
+echo "- Warnungen zu Qt6QmlAssetDownloader sind unkritisch."
+echo "- Bei 'Killed signal terminated program cc1plus': das Skript reduziert Jobs; ggf. erneut ausführen."
+echo "- Wenn 'ROUTINO not found': prüfe 'sudo ldconfig -v | grep routino' und konfiguriere erneut."
