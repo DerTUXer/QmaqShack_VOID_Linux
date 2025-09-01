@@ -2,7 +2,7 @@ Beschreibung von QmaqShack_VOID_Linux
 
 Von dieser Seite https://github.com/Maproom/qmapshack den Quell-Code von QmapShack herunterladen im im Download-Verzeichnis entpacken.
 
-Dies Skript ausfügbar machen und aus dem Terminal heraus starten.
+Dieses Skript ausfügbar machen und aus dem Terminal heraus starten.
 Es werden alle benötigten Pakete nachinstalliert.
 Aus dem Quellcode wird das Paket gebaut und automatisch instaliert.
 
